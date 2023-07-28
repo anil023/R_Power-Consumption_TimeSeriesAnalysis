@@ -1,0 +1,304 @@
+---
+title: "Power-Consumption-TimeSeriesAnalysis"
+author: "Anil Raju and Justin DeHerder"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Data Cleaning
+
+```{r , echo = FALSE,include = FALSE}
+
+#Libraries
+library(TSA)
+library(sandwich)
+library(lmtest)
+library(data.table)
+library(dplyr)
+library(tseries)
+library(ggplot2)
+library(forecast)
+library(Metrics)
+
+```
+
+
+```{r }
+
+#Read Dataset
+data_original<- read.csv("household_power_consumption.csv", sep=";", header=T)
+str(data_original)
+
+#Only take one power Variable for our analysis
+data_new <- data_original[,c(1,3)]
+str(data_new)
+
+#convert power variable to numeric
+data_new$Global_active_power <- as.numeric(data_new$Global_active_power)
+str(data_new)
+
+#convert date variable to type Date
+data_new$Date <- as.Date(data_new$Date, format = "%d/%m/%Y")
+str(data_new) 
+
+#create variable for week as data set is too large to make out any patterns
+data_new$week <- cut.Date(data_new$Date, breaks = "1 week", labels = FALSE)
+str(data_new) 
+
+#convert to data table and compute weekly means of power used
+setDT(data_new)
+
+weekly_avg <- data_new[,list(mean=mean(na.omit(Global_active_power))), by=week]
+str(weekly_avg)
+
+
+```
+
+
+##Pre-processing Data
+
+
+```{r }
+
+#Identify and remove rows with missing data
+missing_data_rows <- which(weekly_avg$Global_active_power == '?')  
+missing_data_rows
+
+#Remove three rows for data from 2006 to avoid confusion in the plot, results were the same without this deletion 
+#data_mod <- weekly_avg[-(1:3),] 
+data_mod <- weekly_avg[,] 
+str(data_mod)
+
+#Training Data(90%) and Test Data(10%)
+xx <- round(0.9*nrow(data_mod))
+data_reduced <- data_mod[0:xx,]
+data_test <- data_mod[(xx+1):nrow(data_mod),]
+
+
+```
+
+##Time Plot for the Data
+
+
+```{r }
+
+#convert to ts
+weekly_avg_ts <- ts(data_reduced[,2],freq=52, start = c(2006,50,12))
+
+plot(weekly_avg_ts, ylab = 'Active Power (KW)', xlab = 'Year')
+
+# decompose into trend + seasonal components + noise and plot
+plot(decompose(weekly_avg_ts))
+#shows no trend but a possibility of seasonality 
+#no transformation is needed
+#will pursue SARIMA modelling for this section
+
+#We observe seasonal behavior probably because of other factors like weather 
+#affecting electric power usage in the household
+
+
+```
+
+##Estimate d
+
+
+```{r }
+
+#refer time plot from above
+acf(weekly_avg_ts, lag.max =nrow(weekly_avg_ts)) #slow decay shows non-stationary
+
+adf.test(weekly_avg_ts)#non-stationary
+pp.test(weekly_avg_ts)
+
+#Difference Model and then plot time/ACF/PACF
+diff52 = diff(weekly_avg_ts,52)
+ggtsdisplay(diff52, lag.max = nrow(weekly_avg_ts))
+#acf(diff52, lag.max = nrow(weekly_avg_ts))
+#pacf(diff52, lag.max = nrow(weekly_avg_ts))
+#Time and ACF plot shows stationarity
+
+adf.test(diff52)	
+pp.test(diff52) #stationary
+#D=1
+
+
+```
+
+##Estimate p,q,P and Q
+
+
+
+```{r }
+
+#Use ACF and PACF plot from above
+eacf(diff52)
+#p=1 as ACF plot decays geometrically and PACF plots cuts off after lag 1
+#q=0 as ACF plot doesn't drop and PACF is not an ideal tool
+#s=52 is the period
+#P=0 ACF dies off abruptly after lag 1 and PACF gradually dies away
+#Q=1 as ACF plot shows cutoff after lag 52/LAG 1
+
+
+```
+
+##SARIMA Model
+
+
+```{r }
+
+#Candidate Models
+model1 <- Arima(weekly_avg_ts,order = c(1,0,0), seasonal = list(order = c(0,1,1),period = 52))
+model2 <- Arima(weekly_avg_ts,order = c(0,0,1), seasonal = list(order = c(0,1,1),period = 52))
+model3 <- Arima(weekly_avg_ts,order = c(1,0,1), seasonal = list(order = c(0,1,1),period = 52))
+
+AIC_tab <- c(model1$aicc,model2$aicc,model3$aicc) 
+AIC_tab #minimum AICc is for Model1(selected)
+
+#Overfitting
+model2 <- Arima(weekly_avg_ts,order = c(2,0,0), seasonal = list(order = c(0,1,1),period = 52))
+model3 <- Arima(weekly_avg_ts,order = c(1,0,1), seasonal = list(order = c(0,1,1),period = 52))
+
+AIC_tab <- c(model1$aicc,model2$aicc,model3$aicc) 
+AIC_tab #minimum AICc is for Model1(selected)
+
+#Best Model
+#modelf <- auto.arima(weekly_avg_ts)
+modelf <- Arima(weekly_avg_ts,order = c(1,0,0), seasonal = list(order = c(0,1,1),period = 52))
+
+
+```
+
+##Model Diagnostics
+
+
+```{r }
+
+#Plot ACF and other plot for residuals
+tsdiag(modelf)
+plot(rstandard(modelf), type ="o")
+#Standardized residual plot - no clear trend
+#ACF plot decays to zero and
+#Ljung-Box test shows p-value >0.05, therefore data is independent
+
+plot(modelf$residuals, type = "p",pch = 20)
+abline(0,0)
+#residual plot - no clear trend in variance or distribution
+
+plot(fitted(modelf),modelf$residuals)
+abline(0,0)# no definite trend, so mean is zero and homoscedastic
+
+qqnorm(modelf$residuals)
+qqline(modelf$residuals) #not normally distributed at the ends
+shapiro.test(modelf$residuals)
+
+
+```
+
+##Forecast
+
+
+```{r }
+
+#Forecast and Plot for the test set
+Pred <- predict(modelf, n.ahead=nrow(data_test)) 
+pr=Pred$pred
+uci=pr+2*Pred$se #Upper Confidence Interval
+lci=pr-2*Pred$se #Lower Confidence Interval
+
+#generate time series for plotting
+pr=ts(pr,start=c(2010,29),freq=52)
+uci=ts(uci,start=c(2010,29),freq=52)
+lci=ts(lci,start=c(2010,29),freq=52)
+
+ymin=min(c(as.vector(lci),weekly_avg_ts))-.1
+ymax=max(c(as.vector(uci),weekly_avg_ts))+.1
+
+#Full data set time series data; i.e. not split into training and test set for plotting
+data_mod_ts <- ts(data_mod[,2],freq=52, start = c(2006,50,12))
+
+#Fit SARIMA model on the training set time frame
+fit4 = ts(fitted(modelf),freq=52,start=c(2006,50,12))
+
+plot(data_mod_ts,xlim=c(2007,2011),ylim=c(ymin,ymax),main="Electric Power Consumption") #Actual Data
+lines(fit4, lty=30, col="blue") #Model on Training Set
+lines(pr,col=2) #Model on Test Set
+lines(uci,col=3) #Upper Confidence Interval
+lines(lci,col=3) #Lower Confidence Interval
+
+Mse = mean((data_test$mean - pr)^2)
+Rmse = sqrt(Mse) #Root Mean Square Error
+
+
+```
+
+##Seasonal Means model
+
+
+```{r }
+
+#candidate model: deterministic seasonal + linear trend
+week = season(weekly_avg_ts)
+model4=lm(weekly_avg_ts~time(weekly_avg_ts)+week)
+model4_rstd = rstandard(model4)
+summary(model4)
+#adjusted R-squared: 0.6762
+
+
+#assessing residuals
+#zero mean and homoskedasticity
+plot(model4_rstd,xlab='Time',ylab='Standardized Residuals', main = 'Residuals of Seasonal Means Model', ylim =c(-4,5.5) ,type='o')
+abline(h=0,lty=2)
+
+#normality
+qqnorm(model4_rstd, main = "Residuals of Seasonal Means Model")
+qqline(model4_rstd)
+hist(model4_rstd)
+shapiro.test(model4_rstd)
+
+#Independence. Not independent so must use HAC test
+acf(model4_rstd, 156)
+runs(model4_rstd)
+
+# for consistent variance estimation: use 'vcovHAC' function
+coeftest(model4, vcov=vcovHAC(model4), df=Inf)
+
+#HAC test indicates linear term not significant
+
+#Plot of fit
+plot(weekly_avg_ts, type="l", ylab="KW", xlab="Year", main="Fitted Model")
+fit4 = ts(fitted(model4),freq=52,start=c(2006,50,12))
+lines(fit4, lty=2, col="red")
+
+
+#candidate model: deterministic seasonal + Quad trend
+tm = time(weekly_avg_ts)
+tm2 = (time(weekly_avg_ts))^2
+model5=lm(weekly_avg_ts~tm+tm2+week)
+model5_rstd = rstandard(model5)
+summary(model5)
+#adjusted r-squared: 0.6886
+
+#Independence checks. Not independent so must use HAC test
+acf(model5_rstd, 156)
+runs(model5_rstd)
+
+coeftest(model5, vcov=vcovHAC(model5), df=Inf)
+#linear and quadratic terms insignificant
+
+#candidate model: cosine
+har <- harmonic(weekly_avg_ts, 1)
+model6 = lm(weekly_avg_ts~har)
+summary(model6)
+#adjusted r-squared: 0.5824
+
+
+
+```
+
+
+
+
