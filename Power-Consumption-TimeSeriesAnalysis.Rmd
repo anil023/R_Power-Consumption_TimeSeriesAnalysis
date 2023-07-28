@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ##Data Cleaning
 
 ```{r , echo = FALSE,include = FALSE}
-
+#Install and Load below Libraries
 #Libraries
 library(TSA)
 library(sandwich)
@@ -26,11 +26,12 @@ library(Metrics)
 
 ```
 
-
 ```{r }
 
 #Read Dataset
-data_original<- read.csv("household_power_consumption.csv", sep=";", header=T)
+#Extract the .csv file from the zip file which is stored in the same folder as the RMarkdown File
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+data_original<- read.csv(unzip("household_power_consumption.zip","household_power_consumption.csv"), sep=";", header=T)
 str(data_original)
 
 #Only take one power Variable for our analysis
